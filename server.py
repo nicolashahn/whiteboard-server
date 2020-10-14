@@ -7,19 +7,27 @@ import threading
 HOST = "127.0.0.1"  # Standard loopback interface address (localhost)
 PORT = 65432  # Port to listen on (non-privileged ports are > 1023)
 
+_rooms = { "default": []}
 
 class ClientThread(threading.Thread):
     def __init__(self, addr, conn):
         threading.Thread.__init__(self)
         self.conn = conn
+        _rooms["default"].append(self)
+        self.addr = addr
         print("New connection added: ", addr)
+
+    def __del__(self):
+        print("Removing connection", self.addr)
+        _rooms["default"].remove(self)
 
     def run(self):
         # self.csocket.send(bytes("Hi, This is from Server..",'utf-8'))
         messages = []
         message = b""
         while True:
-            data = self.conn.recv(1024)
+            data = self.conn.recv(1024).strip()
+            print(data)
             chunks = data.split(b"\n")
             for chunk in chunks[:-1]:
                 message += chunk
@@ -29,7 +37,15 @@ class ClientThread(threading.Thread):
             print(messages)
             if not data:
                 break
-            conn.sendall(b"hi\n")
+
+            for msg_obj in messages:
+                for client in _rooms["default"]:
+                    msg_str = bytes(json.dumps(msg_obj), encoding='utf8')
+                    try:
+                        client.conn.sendall(msg_str + b'\n')
+                    except:
+                        pass
+            messages = []
         conn.close()
 
 
