@@ -26,15 +26,16 @@ class ClientThread(threading.Thread):
         messages = []
         message = b""
         while True:
-            data = self.conn.recv(1024).strip()
-            print(data)
+            data = self.conn.recv(1024)
             chunks = data.split(b"\n")
             for chunk in chunks[:-1]:
                 message += chunk
                 messages.append(json.loads(message))
                 message = b""
             message += chunks[-1]
-            print(messages)
+            if data[-1] == "\n":
+                messages.append(json.loads(message))
+                message = b""
             if not data:
                 break
 
