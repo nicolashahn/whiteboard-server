@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import io
+import os
 import json
 import socket
 import threading
@@ -24,35 +25,72 @@ class Room:
     def __init__(self, name="default"):
         self.clients = []
         self.name = name
-        self.filename = "/tmp/room_"+name
-        self.write_handle = open(self.filename, "wb")
+        self.msgs_file = "/tmp/room_"+name+"_msgs"
+        self.write_handle = open(self.msgs_file, "wb")
         self.image = Image.new("L", (WIDTH, HEIGHT), 255)
+        self.image_file = "/tmp/room_"+name+"_img"
         self.imgdraw = ImageDraw.Draw(self.image)
+        self.lock = threading.Lock()
+
+        if os.path.exists(self.image_file):
+            self.image = Image.open(self.image_file)
+
+        if os.path.exists(self.msgs_file):
+            with open(self.msgs_file, "rb") as f:
+                for line in f.readlines():
+                    msg_obj = json.loads(line)
+                    x, y, px, py = (
+                        msg_obj["x"], 
+                        msg_obj["y"], 
+                        msg_obj["prevx"],
+                        msg_obj["prevy"]
+                    )
+                    self.imgdraw.line(
+                        [(px, py), (x, y)], 
+                        fill=msg_obj["color"],
+                        width=msg_obj["width"]
+                    )
+
 
     def __del__(self):
-        self.write_handle.close()
+        with self.lock:
+            self.write_handle.close()
 
     def add(self, client):
-        self.clients.append(client)
-        self.write_handle.flush()
+        with self.lock:
+            self.clients.append(client)
+            self.write_handle.flush()
 
-        with open(self.filename, 'rb') as f:
-            client.conn.sendall(f.read())
+            with open(self.msgs_file, 'rb') as f:
+                client.conn.sendall(f.read())
 
     def remove(self, client):
-        print("Removing connection", client.conn.addr)
-        self.clients.remove(client)
+        with self.lock:
+            print("Removing connection", client.conn.addr)
+            self.clients.remove(client)
 
     def send(self, msg_str):
-        for client in self.clients:
-            try:
-                client.conn.sendall(msg_str + b'\n')
-            except:
-                pass
+        with self.lock:
+            for client in self.clients:
+                try:
+                    client.conn.sendall(msg_str + b'\n')
+                except:
+                    pass
 
-        self.write_handle.write(msg_str)
-        self.write_handle.write(b'\n')
-        self.write_handle.flush()
+            # make thread safe?
+            self.write_handle.write(msg_str + b'\n')
+            self.write_handle.flush()
+
+    def clear(self):
+        with self.lock:
+            self.image = Image.new("L", (WIDTH, HEIGHT), 255)
+            self.clear_log()
+
+        self.send(b'{"type":"clear"}')
+
+    def clear_log(self):
+        self.write_handle.truncate()
+
 
 
 _rooms = { "default": Room(name="default")}
@@ -81,7 +119,13 @@ class ClientThread(threading.Thread):
         # TODO send URL with image download
 
     def handle_message(self, msg_obj):
-        if msg_obj["type"] == "draw" and self.room:
+        if msg_obj["type"] == "join":
+            self.join(msg_obj["room"])
+
+        if self.room == None:
+            return
+
+        if msg_obj["type"] == "draw":
             x, y, px, py = (
                 msg_obj["x"], 
                 msg_obj["y"], 
@@ -97,8 +141,9 @@ class ClientThread(threading.Thread):
             msg_str = bytes(json.dumps(msg_obj), encoding='utf8')
             with room_lock:
                 _rooms[self.room].send(msg_str)
-        elif msg_obj["type"] == "join":
-            self.join(msg_obj["room"])
+        elif msg_obj["type"] == "clear":
+            with room_lock:
+                _rooms[self.room].clear()
 
     def run(self):
         # self.csocket.send(bytes("Hi, This is from Server..",'utf-8'))
@@ -124,10 +169,7 @@ class ClientThread(threading.Thread):
                 message = b""
 
             for msg_obj in messages:
-                try:
-                    self.handle_message(msg_obj)
-                except Exception as e:
-                    print("EXC", msg_obj, e)
+                self.handle_message(msg_obj)
 
             messages = []
         self.conn.close()
@@ -141,8 +183,13 @@ def get_room_image(room):
     with room_lock:
         if room not in _rooms:
             return "room not found"
-        im = _rooms[room].image
-    im.save(s, format="png")
+        room = _rooms[room]
+
+    with room.lock:
+        im = room.image
+        im.save(room.image_file, format="png")
+        im.save(s, format="png")
+        room.clear_log()
     bytes = s.getvalue()
     return bytes
 
